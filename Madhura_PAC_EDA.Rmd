@@ -1,0 +1,444 @@
+---
+title: "Code_EDA"
+author: "Madhura Jadhav"
+output: html_document
+---
+
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+
+library(skimr)
+library(summarytools)
+library(lubridate)
+library(stringr)
+library(Hmisc)
+library(broom)
+library(car)
+
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(xgboost)
+library(vtreat)
+```
+
+
+```{r}
+original_data = read.csv('analysisData.csv')
+dim(original_data)
+```
+
+### Filtering the data to remove out of scope / redundant attributes
+```{r}
+data=original_data[c('id','host_name', 'host_since', 'host_response_time','host_response_rate', 'host_is_superhost', 'host_total_listings_count', 'neighbourhood_cleansed', 'neighbourhood_group_cleansed', 'zipcode', 'property_type', 'room_type', 'accommodates', 'bathrooms', 'bedrooms', 'beds', 'amenities', 'price','cleaning_fee','guests_included','extra_people', 'minimum_nights','maximum_nights','availability_30','availability_60','availability_90','availability_365', 'number_of_reviews','number_of_reviews_ltm','first_review','last_review','review_scores_rating', 'review_scores_accuracy', 'review_scores_cleanliness', 'review_scores_checkin', 'review_scores_communication', 'review_scores_location', 'review_scores_value', 'instant_bookable','calculated_host_listings_count','reviews_per_month')]
+dim(data)
+
+```
+```{r}
+#library(summarytools)
+print(dfSummary(data,style='grid',graph.col = T),method = 'render')
+```
+
+
+## Missing Values
+
+#### Missing Values Columns: cleaning_fee 5276,  beds 44, host_total_listings_count 21, reviews_per_month 2, host_response_time 8679, host_response_rate8679
+#### Will drop rows with missing values <50 for a column 
+
+```{r}
+data = data %>% drop_na(reviews_per_month)
+data = data %>% drop_na(host_total_listings_count)
+data = data %>% drop_na(beds)
+```
+
+#### Cleaning fees is option so absence of it is cleaning fee=0
+```{r}
+data = data %>% mutate(cleaning_fee = ifelse(is.na(data$cleaning_fee),0,data$cleaning_fee))
+```
+
+#### We will drop host_response_time 8679, host_response_rate 8679 as we have ~25% missing data
+```{r}
+data = data[ , -which(names(data) %in% c("host_response_rate","host_response_time"))]
+```
+
+## Data Transformations
+
+### Converting columns with logical data type to 1 and 0 
+
+#### host_is_superhost,instant_bookable 
+
+```{r}
+data$host_is_superhost = as.numeric(ifelse(data$host_is_superhost == 't', 1, 0))
+data$instant_bookable = as.numeric(ifelse(data$instant_bookable == 't', 1, 0))
+```
+
+### New Features
+
+#### host_since can be used to calculate host active duration in months
+#### first_review & last_review can be used to calculate listing active duration in months
+#### we can drop column last_review,first_review, host_since after calculating new features
+
+```{r}
+#max(data$last_review) is '2020-01-03'
+
+data$listing_active_duration = round(as.numeric(difftime(data$last_review, data$first_review, units = "days"))/(365.25/12),2)
+data$host_active_duration = round(as.numeric(difftime('2020-01-03', data$host_since, units ="days"))/(365.25/12),2)
+
+data = subset(data, select = -c(host_since,first_review,last_review) )
+```
+
+#### Amenities can be extracted to check important individual amenity
+```{r}
+#library(stringr)
+data$TV = str_extract(data$amenities, "TV")
+data$TV[is.na(data$TV)] <- 0
+data$TV[data$TV == "TV"] <- 1
+
+data$Elevator = str_extract(data$amenities, "Elevator")
+data$Elevator[is.na(data$Elevator)] <- 0
+data$Elevator[data$Elevator == "Elevator"] <- 1
+```
+
+### Combine variable levels
+
+#### property_type
+##### combine levels with <1% data to 'Others' making total number of levels for property_type as 6
+
+```{r}
+data %>% group_by(property_type) %>% summarise(n=n()) %>% arrange(desc(n))
+```
+```{r}
+data=data %>% mutate(property_type = fct_lump(property_type, prop = 0.01)) 
+```
+
+#### room_type
+##### updating 'Hotel room' level as 'Private room' as we have just 3 'Hotel room' records 
+
+```{r}
+data$room_type = fct_collapse(data$room_type, 'Private room' = c('Hotel room', 'Private room'))
+```
+
+#### bathrooms
+##### updating 0.5 bathroom levels and reducing number of levels
+```{r}
+data$bathrooms[data$bathrooms < 1] <- 1  
+data$bathrooms[ data$bathrooms == 1.5] <- 2  
+data$bathrooms[ data$bathrooms == 2.5] <- 3  
+data$bathrooms[ data$bathrooms == 3.5] <- 4  
+data$bathrooms[ data$bathrooms > 4] <- 4 
+```
+
+#### bedrooms
+##### reducing number of levels from 12 to 7
+```{r}
+data$bedrooms[data$bedrooms > 6] <- 6  
+```
+
+## Delete erroneous data
+
+#### price
+##### delete listings with price=0,assuming it is data error
+```{r}
+data= data[!(data$price==0),]
+```
+
+#### zipcode
+##### clean dirty zipcode data, treat NAs with mode value
+```{r}
+data$zipcode=str_replace_all(data$zipcode,"NY ","")
+data$zipcode=str_replace_all(data$zipcode," ","")
+data$zipcode[data$zipcode=="11385-2308"] = '11385'
+data$zipcode[data$zipcode=="11103-3233"] = '11103'
+data$zipcode[data$zipcode=="10003-8623"] = '10003'
+data$zipcode[data$zipcode=="11413-3220"] = '11413'
+data$zipcode[data$zipcode=="10065"] = '10021'
+data$zipcode[data$zipcode=="11249"] = '11211'
+data$zipcode <- gsub('NA','11211',data$zipcode)
+```
+
+```{r}
+# odata %>% 
+#    filter(neighbourhood_group_cleansed=='Staten Island') %>%
+#    count(zipcode, sort = TRUE) 
+
+#Brooklyn -11211
+#Bronx - 10469
+#Manhattan - 10002
+#Queens- 11385
+#SA - 10301
+```
+
+# EDA
+
+
+##Target Variable - price distribution
+```{r}
+ggplot(data, aes(x=price)) + 
+  geom_histogram(binwidth = 10)
+```
+#### will be analyzing numeric variables across price with scatter plots
+#### will be analyzing categorical and few numeric variables across price with box plots
+
+```{r}
+box = geom_boxplot(varwidth=T) 
+scatter = geom_point()
+```
+
+# Analyzing Categorical Variable
+## categorical: neighbourhood_cleansed,neighbourhood_group_cleansed
+
+### neighbourhood_cleansed -- explored neighbourhood_cleansed for each borough.. but Too many levels and no so DROP
+
+```{r}
+# data %>% 
+#   filter(neighbourhood_group_cleansed == 'Brooklyn') %>% 
+#   ggplot(aes(x=neighbourhood_cleansed,y=price)) + box
+```
+```{r}
+# data %>% 
+#   filter(neighbourhood_group_cleansed == 'Bronx') %>% 
+#   ggplot(aes(x=neighbourhood_cleansed,y=price)) + box
+```
+```{r}
+# data %>% 
+#   filter(neighbourhood_group_cleansed == 'Manhattan') %>% 
+#   ggplot(aes(x=neighbourhood_cleansed,y=price)) + box
+```
+```{r}
+# data %>% 
+#   filter(neighbourhood_group_cleansed == 'Queens') %>% 
+#   ggplot(aes(x=neighbourhood_cleansed,y=price)) + box
+```
+```{r}
+# data %>% 
+#   filter(neighbourhood_group_cleansed == 'Staten Island') %>% 
+#   ggplot(aes(x=neighbourhood_cleansed,y=price)) + box
+```
+
+
+### neighbourhood_group_cleansed
+
+```{r}
+ggplot(data, aes(x=neighbourhood_group_cleansed,y=price)) + box
+```
+
+# Analyzing Factor Variables
+## factor: property_type, room_type
+
+### property_type
+
+```{r}
+ggplot(data, aes(x=property_type,y=price)) + box
+```
+
+### room_type
+
+```{r}
+ggplot(data, aes(x=room_type,y=price)) + box
+```
+
+# Analyzing Numeric Factor Variables
+## numeric factor: host_is_superhost, accommodates, bathrooms, bedrooms, beds, availability_30, review_scores_rating, review_scores_accuracy,  review_scores_cleanliness, review_scores_checkin, review_scores_communication,  review_scores_location,  review_scores_value, instant_bookable
+
+### host_is_superhost
+```{r}
+ggplot(data, aes(x=as.factor(host_is_superhost),y=price)) + box
+```
+
+### accommodates -- might convert 9 onwards as 9
+```{r}
+ggplot(data, aes(x=as.factor(accommodates),y=price)) + box
+```
+### bathrooms- we have converted 
+
+```{r}
+ggplot(data, aes(x=as.factor(bathrooms),y=price)) + box
+```
+
+### bedrooms
+
+```{r}
+ggplot(data, aes(x=as.factor(bedrooms),y=price)) + box
+```
+
+###beds -- might convert 8 onwards as 8
+
+```{r}
+ggplot(data, aes(x=as.factor(beds),y=price)) + box
+```
+### availability_30
+
+```{r}
+ggplot(data, aes(x=as.factor(availability_30),y=price)) + box
+```
+### review_scores_rating
+
+```{r}
+data%>%
+  mutate(review_scores_rating_bins = cut(review_scores_rating, breaks = c(0,10,20,30,40,50,60,70,80,90,100))) %>% 
+  ggplot(aes(review_scores_rating_bins,price)) + box
+
+```
+
+
+
+### review_scores_accuracy
+
+```{r}
+ggplot(data, aes(x=as.factor(review_scores_accuracy),y=price)) + box
+```
+
+### review_scores_cleanliness
+
+```{r}
+ggplot(data, aes(x=as.factor(review_scores_cleanliness),y=price)) + box
+```
+
+### review_scores_checkin
+
+```{r}
+ggplot(data, aes(x=as.factor(review_scores_checkin),y=price)) + box
+```
+
+### review_scores_communication
+
+```{r}
+ggplot(data, aes(x=as.factor(review_scores_communication),y=price)) + box
+```
+
+### review_scores_location
+
+```{r}
+ggplot(data, aes(x=as.factor(review_scores_location),y=price)) + box
+```
+
+### review_scores_value
+
+```{r}
+ggplot(data, aes(x=as.factor(review_scores_value),y=price)) + box
+```
+
+### instant_bookable
+
+```{r}
+ggplot(data, aes(x=as.factor(instant_bookable),y=price)) + box
+```
+# Analyzing Numeric Variables
+## numeric: host_total_listings_count, cleaning_fee, minimum_nights, maximum_nights, number_of_reviews, number_of_reviews_ltm, calculated_host_listings_count, reviews_per_month, listing_active_duration, host_active_duration
+
+### host_total_listings_count
+
+```{r}
+ggplot(data, aes(x=host_total_listings_count,y=price)) + scatter
+```
+
+### cleaning_fee
+
+```{r}
+ggplot(data, aes(x=log(cleaning_fee),y=price)) + scatter #+ geom_smooth(method = "lm", se=FALSE, color="black", aes(group=1))
+```
+
+### minimum_nights
+
+```{r}
+ggplot(data, aes(x=(minimum_nights),y=price)) + scatter
+```
+
+### maximum_nights
+
+```{r}
+ggplot(data, aes(x=maximum_nights,y=price)) + scatter
+```
+### number_of_reviews
+
+```{r}
+ggplot(data, aes(x=number_of_reviews,y=price)) + scatter
+```
+
+### number_of_reviews_ltm
+
+```{r}
+ggplot(data, aes(x=number_of_reviews_ltm,y=price)) + scatter
+```
+
+
+### calculated_host_listings_count
+
+```{r}
+ggplot(data, aes(x=calculated_host_listings_count,y=price)) + scatter
+```
+
+### reviews_per_month
+
+```{r}
+ggplot(data, aes(x=reviews_per_month,y=price)) + scatter
+```
+
+### listing_active_duration
+
+```{r}
+ggplot(data, aes(x=listing_active_duration,y=price)) + scatter
+```
+
+### host_active_duration
+
+```{r}
+ggplot(data, aes(x=host_active_duration,y=price)) + scatter
+```
+
+## Correlations
+```{r}
+#library(corrplot)
+#numeric variables
+numericVars <- which(sapply(data, is.numeric)) 
+data_numVar <- data[, numericVars]
+
+#correlations of all numeric variables
+cor_numVar <- cor(data_numVar, use="pairwise.complete.obs")
+
+#sorting on decreasing correlations with price
+cor_sorted <- as.matrix(sort(cor_numVar[,'price'], decreasing = TRUE))
+print(cor_sorted)
+```
+
+#Multivariate Filter
+```{r}
+model = lm(price~.,data_numVar)
+#library(broom)
+summary(model) %>%
+  tidy()
+```
+```{r}
+#library(car)
+vif(model)
+```
+```{r}
+data.frame(Predictor = names(vif(model)), VIF = vif(model)) %>%
+  ggplot(aes(x=VIF, y = reorder(Predictor, VIF), fill=VIF))+
+  geom_col()+
+  geom_vline(xintercept=5, color = 'gray', size = 1.5)+
+  geom_vline(xintercept = 10, color = 'red', size = 1.5)+
+  scale_fill_gradient(low = '#fff7bc', high = '#d95f0e')+
+  scale_y_discrete(name = "Predictor")+
+  scale_x_continuous(breaks = seq(5,30,5))+
+  theme_classic()
+```
+
+##Write transformed data to csv file
+
+```{r}
+write.csv(data, "clean_full_analysis_data.csv",row.names = F)
+```
+
+
+##Write selective features transformed data to csv file
+
+```{r}
+data_trimmed = data[,c('price','zipcode','room_type','bedrooms','accommodates','neighbourhood_group_cleansed','availability_30','host_is_superhost','review_scores_rating','review_scores_location','TV','Elevator','cleaning_fee','property_type','minimum_nights','bathrooms')]
+
+write.csv(data_trimmed, "clean_trimmed_analysis_data.csv",row.names = F)
+```

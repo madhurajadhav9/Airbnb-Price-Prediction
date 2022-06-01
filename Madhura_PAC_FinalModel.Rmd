@@ -1,0 +1,144 @@
+---
+title: "Madhura_PAC_FinalModel"
+author: "Madhura Jadhav"
+output: html_document
+---
+
+
+# Modelling
+
+```{r}
+data = read.csv('clean_trimmed_analysis_data.csv')
+dim(data)
+```
+```{r}
+data$zipcode = as.factor(data$zipcode)
+data$room_type = as.factor(data$room_type)
+data$property_type = as.factor(data$property_type)
+data$neighbourhood_group_cleansed = as.factor(data$neighbourhood_group_cleansed)
+```
+```{r}
+set.seed(61710)
+split = createDataPartition(y=data$price,p = 0.7,list = F,groups = 50)
+train = data[split,]
+test = data[-split,]
+
+otrain=train[,c('zipcode','room_type','bedrooms','neighbourhood_group_cleansed','accommodates','availability_30','host_is_superhost','review_scores_rating','review_scores_location','TV','Elevator','cleaning_fee','property_type','minimum_nights','bathrooms')]
+otest=test[,c('zipcode','room_type','bedrooms','accommodates','neighbourhood_group_cleansed','availability_30','host_is_superhost','review_scores_rating','review_scores_location','TV','Elevator','cleaning_fee','property_type','minimum_nights','bathrooms')]
+```
+
+
+## Best Model -  Tuned XGBoost with 15 Features :
+#### 'zipcode','room_type','bedrooms','accommodates','neighbourhood_group_cleansed','availability_30','host_is_superhost','review_scores_rating','review_scores_location','TV','Elevator','cleaning_fee','property_type','minimum_nights','bathrooms'
+
+
+
+```{r}
+set.seed(617)
+
+trControl = trainControl(method="cv",number=5)
+tuneGrid = expand.grid(nrounds = 500,
+                       max_depth = 6,
+                       eta = c(0.02,0.0025,0.03),
+                       gamma=10,
+                       colsample_bytree=0.8,
+                       min_child_weight=c(10,12),
+                       subsample=0.8)
+garbage = capture.output(cvModel_1 <- train(price~zipcode+room_type + bedrooms + neighbourhood_group_cleansed + accommodates + availability_30 + review_scores_rating + cleaning_fee + property_type + review_scores_location + Elevator + TV + host_is_superhost + minimum_nights + bathrooms,
+                                          data=otrain, method="xgbTree", trControl=trControl, tuneGrid=tuneGrid))
+
+#############################
+
+trt = designTreatmentsZ(dframe = otrain, varlist = names(otrain)[1:15] )
+
+
+newvars = trt$scoreFrame[trt$scoreFrame$code%in% c('clean','lev'),'varName']
+
+train_input = prepare(treatmentplan = trt, dframe = otrain, varRestriction = newvars)
+test_input = prepare(treatmentplan = trt, dframe = otest, varRestriction = newvars)
+
+xgboost = xgboost(data=as.matrix(train_input),
+                  label = otrain$price,
+                  nrounds=500,
+                  verbose=0,
+                  eta = 0.02, gamma = 10, max_depth = 8,# min_child_weight = 10)
+                  subsample = 0.8,colsample_bytree = 0.8, min_child_weight = 9)
+
+##################################
+
+pred_train = predict(xgboost, newdata=as.matrix(train_input))
+rmse_train_xgboost = sqrt(mean((pred_train - otrain$price)^2));
+rmse_train_xgboost
+
+pred = predict(xgboost, newdata=as.matrix(test_input))
+rmse_xgboost = sqrt(mean((pred - o$price)^2));
+rmse_xgboost
+
+#30_1 -> XG Boost Train 59.35		test 61.86		Submission score 62.46
+#30_2 -> XG Boost Train 53.12		test 60.83		Submission score 61.73
+#30_3 -> XG Boost Train 50.72		test 58.51
+# 1_1 -> XG Boost Train 51.56		test 57.93		Submission score 57.76
+```
+
+# Scoring Data - Feature Engineering
+# Submission File Creation
+```{r}
+
+scoringData = read.csv('scoringData.csv')
+
+scoringData$bedrooms[scoringData$bedrooms > 6] <- 6
+scoringData$bedrooms = as.integer(scoringData$bedrooms)
+
+scoringData$bathrooms[scoringData$bathrooms < 1] <- 1
+scoringData$bathrooms[scoringData$bathrooms == 1.5] <- 2
+scoringData$bathrooms[scoringData$bathrooms == 2.5] <- 3
+scoringData$bathrooms[scoringData$bathrooms == 3.5] <- 4
+scoringData$bathrooms[scoringData$bathrooms > 4] <- 4
+
+scoringData$bathrooms = as.integer(scoringData$bathrooms)
+
+scoringData$host_is_superhost = as.integer(ifelse(scoringData$host_is_superhost == 't', 1, 0))
+
+scoringData$TV = str_extract(scoringData$amenities, "TV")
+scoringData$TV = as.integer(ifelse(scoringData$TV == 'TV', 1, 0))
+
+scoringData$Elevator = str_extract(scoringData$amenities, "Elevator")
+scoringData$Elevator = as.integer(ifelse(scoringData$Elevator == 'Elevator', 1, 0))
+
+scoringData = scoringData %>% mutate(cleaning_fee = ifelse(is.na(scoringData$cleaning_fee),0,scoringData$cleaning_fee))
+
+scoringData=scoringData %>% mutate(property_type = fct_lump(property_type, prop = 0.01))
+scoringData$property_type = as.factor(scoringData$property_type)
+
+scoringData$room_type = as.factor(scoringData$room_type)
+
+scoringData$neighbourhood_group_cleansed = as.factor(scoringData$neighbourhood_group_cleansed)
+
+scoringData$zipcode=str_replace_all(scoringData$zipcode,"NY ","")
+scoringData$zipcode=str_replace_all(scoringData$zipcode," ","")
+scoringData$zipcode[scoringData$zipcode=="11385-2308"] = '11385'
+scoringData$zipcode[scoringData$zipcode=="11103-3233"] = '11103'
+scoringData$zipcode[scoringData$zipcode=="10003-8623"] = '10003'
+scoringData$zipcode[scoringData$zipcode=="11413-3220"] = '11413'
+scoringData$zipcode[scoringData$zipcode=="10065"] = '10021'
+scoringData$zipcode[scoringData$zipcode=="11249"] = '11211'
+scoringData$zipcode <- gsub('NA','11211',scoringData$zipcode)
+
+scoringData$property_type = as.factor(scoringData$property_type)
+scoringData$room_type = as.factor(scoringData$room_type)
+scoringData$neighbourhood_group_cleansed = as.factor(scoringData$neighbourhood_group_cleansed)
+scoringData$zipcode = as.factor(scoringData$zipcode)
+
+#scoringData$host_active_duration = round(as.numeric(difftime('2020-01-03', scoringData$host_since, units ="days"))/(365.25/12),2)
+
+scoringData1=scoringData[,c('zipcode','room_type','bedrooms','neighbourhood_group_cleansed','accommodates','availability_30','host_is_superhost','review_scores_rating','review_scores_location','TV','Elevator','cleaning_fee','property_type','minimum_nights','bathrooms')]
+
+scoringData1_input = prepare(treatmentplan = trt, dframe = scoringData1, varRestriction = newvars)
+
+pred_score = predict(xgboost, newdata=as.matrix(scoringData1_input))
+
+submissionFile = data.frame(id = scoringData$id, price = pred_score)
+write.csv(submissionFile, 'sample_submission_05_01_2.csv',row.names = F)
+
+```
+
